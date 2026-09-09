@@ -10,7 +10,6 @@ import { I18nProvider } from "@/context/I18nContext";
 
 import Header from "@/components/Header";
 import Footer from "@/components/Footer";
-import ProcessingLoader from "@/components/ProcessingLoader";
 
 import Home from "@/pages/Home";
 import ThemePreview from "@/pages/ThemePreview";
@@ -128,7 +127,6 @@ function AppInner() {
     <div className="App">
       <BrowserRouter>
         <ScrollToTop />
-        <ProcessingLoader />
         <SeoHead />
         <ChromeWrap>
           <AppRouter />

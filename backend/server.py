@@ -35,7 +35,12 @@ from auth import (
 from emails import send_email, send_email_async, render_confirmation, render_reset
 from csc_services import CSC_CATEGORIES, all_service_ids, find_service
 from scrapers import fetch_freejobalert, refresh_vacancies_into_db, fetch_article_detail, backfill_application_mode, is_expired, parse_last_date, state_from_text, _cat_from_title, _dedupe_key, clean_promo_html, _is_junk_link, apply_brand, brand_html
+import ssr
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+# Dynamic rendering is only active in production (dev/preview always serves the SPA).
+APP_ENV = os.environ.get("APP_ENV", "development").strip().lower()
+IS_PRODUCTION = APP_ENV in ("production", "prod")
 
 # MongoDB
 mongo_url = os.environ["MONGO_URL"]
@@ -435,21 +440,32 @@ async def create_contact(payload: ContactIn):
 SITE_URL = os.environ.get("PUBLIC_SITE_URL", "https://hrdigitalservices.in").rstrip("/")
 
 
+@api.get("/sitemap.xml", response_class=Response)
+async def sitemap_xml():
+    """Canonical dynamic sitemap — static pages + ACTIVE (non-expired) vacancies + blogs."""
+    body = await ssr.build_sitemap(db, SITE_URL)
+    return Response(content=body, media_type="application/xml",
+                    headers={"Cache-Control": "public, max-age=1800"})
+
+
 @api.get("/sitemap-vacancies.xml", response_class=Response)
 async def sitemap_vacancies_xml():
+    """Vacancies-only sitemap (ACTIVE jobs). Kept for backwards-compatibility."""
     urls = []
     today = datetime.now(timezone.utc).date().isoformat()
     try:
         async for v in db.vacancies.find(
-            {}, {"_id": 1, "fetched_at": 1}, sort=[("fetched_at", -1)]
-        ).limit(500):
+            {}, {"_id": 1, "fetched_at": 1, "last_date_text": 1}, sort=[("fetched_at", -1)]
+        ).limit(2000):
+            if is_expired(v.get("last_date_text")):
+                continue
             fetched = v.get("fetched_at")
             lastmod = fetched.date().isoformat() if fetched else today
             urls.append(
                 f"  <url><loc>{SITE_URL}/vacancies/{str(v['_id'])}</loc>"
                 f"<lastmod>{lastmod}</lastmod>"
                 f"<changefreq>weekly</changefreq>"
-                f"<priority>0.7</priority></url>"
+                f"<priority>0.8</priority></url>"
             )
     except Exception as e:
         log.warning(f"sitemap vacancies query failed: {e}")
@@ -460,20 +476,8 @@ async def sitemap_vacancies_xml():
         + "\n".join(urls)
         + "\n</urlset>\n"
     )
-    return Response(content=body, media_type="application/xml")
-
-
-# Legacy endpoint kept for backwards-compatibility: redirect to the site-root sitemap.
-@api.get("/sitemap.xml", response_class=Response)
-async def legacy_sitemap_redirect():
-    return Response(
-        content=f'<?xml version="1.0" encoding="UTF-8"?>\n'
-                f'<!-- Sitemap moved to site root -->\n'
-                f'<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
-                f'  <sitemap><loc>{SITE_URL}/sitemap.xml</loc></sitemap>\n'
-                f'</sitemapindex>\n',
-        media_type="application/xml",
-    )
+    return Response(content=body, media_type="application/xml",
+                    headers={"Cache-Control": "public, max-age=1800"})
 
 
 @api.get("/robots.txt", response_class=PlainTextResponse)
@@ -482,9 +486,26 @@ async def robots_txt_legacy():
     return (
         "User-agent: *\n"
         "Allow: /\n"
+        "Allow: /api/sitemap.xml\n"
+        "Allow: /api/sitemap-vacancies.xml\n"
         "Disallow: /api/\n"
-        f"Sitemap: {SITE_URL}/sitemap.xml\n"
+        f"Sitemap: {SITE_URL}/api/sitemap.xml\n"
     )
+
+
+# ─────────── Dynamic Rendering (SSR-for-bots) ───────────
+@api.get("/render", response_class=Response)
+async def render_for_crawler(path: str = "/"):
+    """Explicit server-render endpoint. Returns full crawlable HTML for a route
+    backed by live data. Used by the production edge-rewrite for crawler traffic
+    (and for verification via `curl -A Googlebot`). Falls back to 404 for
+    unsupported routes so the caller can serve the SPA instead."""
+    html_out = await ssr.render_path(db, path, SITE_URL, DEFAULT_SITE_CONTENT)
+    if not html_out:
+        raise HTTPException(status_code=404, detail="Route not SSR-supported")
+    return Response(content=html_out, media_type="text/html; charset=utf-8",
+                    headers={"Cache-Control": "public, max-age=1800",
+                             "X-Rendered-By": "ssr"})
 
 
 # ─────────── Customer Enquiry (public, minimal fields) ───────────
@@ -871,6 +892,7 @@ async def admin_refresh_vacancies(_=Depends(require_admin)):
     before_urls = set([v["url"] async for v in db.vacancies.find({}, {"url": 1})])
     added = await refresh_vacancies_into_db(db)
     total = await db.vacancies.count_documents({})
+    ssr.clear_cache()  # crawlers should see the refreshed data
     # Fan-out notifications for newly-added vacancies
     if added > 0:
         new_docs = await db.vacancies.find({"url": {"$nin": list(before_urls)}}).to_list(added * 2)
@@ -2177,6 +2199,40 @@ app.add_middleware(
 )
 
 
+# ─────────── Dynamic Rendering catch-all (PRODUCTION + crawler only) ───────────
+# In production, when a search-engine / social crawler requests a page URL, serve
+# fully-rendered HTML. Real users (and everything in dev/preview) get the SPA.
+# This route is registered LAST so it never shadows the /api routes above.
+_SPA_INDEX = Path(__file__).parent.parent / "frontend" / "build" / "index.html"
+
+
+def _serve_spa_fallback():
+    if _SPA_INDEX.exists():
+        return FileResponse(str(_SPA_INDEX))
+    # Backend does not host the SPA in this environment — signal the edge/proxy
+    # to serve the SPA build itself.
+    raise HTTPException(status_code=404, detail="Not found")
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+async def spa_or_ssr(full_path: str, request: Request):
+    # Never intercept API / asset paths.
+    if full_path.startswith("api/") or full_path.startswith("static/"):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    ua = request.headers.get("user-agent", "")
+    if IS_PRODUCTION and ssr.is_bot(ua):
+        try:
+            html_out = await ssr.render_path(db, "/" + full_path, SITE_URL, DEFAULT_SITE_CONTENT)
+            if html_out:
+                return Response(content=html_out, media_type="text/html; charset=utf-8",
+                                headers={"X-Rendered-By": "ssr"})
+        except Exception as e:  # requirement 7: never 5xx to a crawler
+            log.warning(f"SSR catch-all failed for /{full_path}: {e}")
+    return _serve_spa_fallback()
+
+
+
 # ─────────── Startup: indexes + seed ───────────
 @app.on_event("startup")
 async def startup():
@@ -2448,6 +2504,7 @@ async def start_scheduler():
             n = await refresh_vacancies_into_db(db)
             # Always backfill so historical rows also get application_mode populated
             await backfill_application_mode(db)
+            ssr.clear_cache()  # crawlers should see the refreshed data
             log.info(f"[scheduler] Vacancies refreshed. new={n}")
             if n > 0:
                 new_docs = await db.vacancies.find({"url": {"$nin": list(before_urls)}}).to_list(n * 2)
