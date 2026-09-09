@@ -258,12 +258,30 @@ async def _render_vacancy_detail(db, site_url: str, canonical: str, vac_id: str,
     name = v.get("post_name") or v.get("title") or "Government Vacancy"
     org = v.get("organization") or "Government of India"
     title = v.get("seo_title") or f"{name} — HR Digital Services"
-    content_html = v.get("content_html") or ""
-    desc = v.get("seo_description") or _strip_html(content_html) or f"{name} recruitment details, eligibility and how to apply."
     last = v.get("last_date_text") or ""
     qual = v.get("qualification") or ""
     posts = v.get("total_posts") or (v.get("structured") or {}).get("total_posts") or ""
     state = v.get("state") or "India"
+
+    # Hindi descriptive content — use cached fields if present, else build
+    # deterministic templates synchronously (no LLM call inside SSR path).
+    import hindi_content as _hc
+    h_intro = v.get("hindi_intro")
+    h_desc = v.get("hindi_description")
+    h_apply = v.get("hindi_how_to_apply")
+    h_select = v.get("hindi_selection_process")
+    if not (h_intro and h_desc and h_apply and h_select):
+        t = _hc.build_templates(v)
+        h_intro = h_intro or t["hindi_intro"]
+        h_desc = h_desc or t["hindi_description"]
+        h_apply = h_apply or t["hindi_how_to_apply"]
+        h_select = h_select or t["hindi_selection_process"]
+
+    def _para(text):
+        return "".join(f"<p>{_e(line)}</p>" for line in str(text).split("\n") if line.strip())
+
+    # Meta description = Hindi intro/description (matches the visible page)
+    desc = (v.get("seo_description") or _strip_html(h_intro) or _strip_html(h_desc))[:300]
 
     posted = v.get("fetched_at")
     if isinstance(posted, datetime):
@@ -275,12 +293,15 @@ async def _render_vacancy_detail(db, site_url: str, canonical: str, vac_id: str,
     if dt:
         valid_through = dt.date().isoformat() + "T23:59:59+05:30"
 
+    # JSON-LD description = the SAME Hindi content shown on the page (schema/content match)
+    schema_desc_html = _para(h_intro) + _para(h_desc) + _para(h_apply) + _para(h_select)
+
     import json as _json
     jobposting = {
         "@context": "https://schema.org/",
         "@type": "JobPosting",
         "title": name,
-        "description": (content_html or _e(desc)) or desc,
+        "description": schema_desc_html,
         "datePosted": date_posted,
         "employmentType": "FULL_TIME",
         "hiringOrganization": {"@type": "Organization", "name": org},
@@ -307,7 +328,10 @@ async def _render_vacancy_detail(db, site_url: str, canonical: str, vac_id: str,
     body = (
         f"<h1>{_e(name)}</h1>"
         f'<div class="meta">{" · ".join(meta_bits)}</div>'
-        + (f"<div>{content_html}</div>" if content_html else f"<p>{_e(desc)}</p>")
+        f"<div class='intro'>{_para(h_intro)}</div>"
+        f"<h2>विवरण</h2><div>{_para(h_desc)}</div>"
+        f"<h2>आवेदन कैसे करें</h2><div>{_para(h_apply)}</div>"
+        f"<h2>चयन प्रक्रिया</h2><div>{_para(h_select)}</div>"
         + f'<p><a href="{_e(site_url)}/">← All latest vacancies</a></p>'
     )
     return _shell(title=title, description=desc, canonical=canonical,

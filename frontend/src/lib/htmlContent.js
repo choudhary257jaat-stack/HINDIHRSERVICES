@@ -233,6 +233,38 @@ function applyMarkdown(root, doc) {
   });
 }
 
+// Convert a plain markdown-ish text (with newlines, "# heading", "**bold**",
+// "* bullet" lines and bare URLs) into block HTML. Used for the AI-generated
+// Hindi content so headings render bold/highlighted and links become clickable.
+export function mdBlocksToHtml(text) {
+  if (!text) return "";
+  const lines = String(text).split(/\r?\n/);
+  const out = [];
+  let listBuf = [];
+  const flush = () => {
+    if (listBuf.length) {
+      out.push("<ul>" + listBuf.map((li) => `<li>${li}</li>`).join("") + "</ul>");
+      listBuf = [];
+    }
+  };
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) { flush(); continue; }
+    const bullet = line.match(/^(?:[*\-•·]|\d+[.)])\s+(.*)$/);
+    if (bullet) { listBuf.push(bullet[1]); continue; }
+    flush();
+    out.push(`<p>${line}</p>`);
+  }
+  flush();
+  return out.join("");
+}
+
+// Full pipeline: markdown text -> block HTML -> enhanced (headings, bold, links).
+export function renderRichText(text) {
+  return enhanceHtml(mdBlocksToHtml(text));
+}
+
+
 export function enhanceHtml(html) {
   if (!html) return "";
   if (typeof window === "undefined" || typeof DOMParser === "undefined") return html;

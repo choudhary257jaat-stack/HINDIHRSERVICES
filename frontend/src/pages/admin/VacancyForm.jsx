@@ -37,6 +37,7 @@ const EMPTY = {
   last_date_text: "", apply_url: "", description: "",
   total_posts: "", seo_title: "", focus_keyword: "", seo_description: "",
   tags: [], important_links: [],
+  hindi_intro: "", hindi_description: "", hindi_how_to_apply: "", hindi_selection_process: "",
 };
 
 /**
@@ -77,6 +78,10 @@ const VacancyForm = ({ initial, onClose, onSaved }) => {
         seo_description: initial.seo_description || "",
         tags: initial.tags || [],
         important_links: initial.important_links || [],
+        hindi_intro: initial.hindi_intro || "",
+        hindi_description: initial.hindi_description || "",
+        hindi_how_to_apply: initial.hindi_how_to_apply || "",
+        hindi_selection_process: initial.hindi_selection_process || "",
       });
     } else {
       setF(EMPTY);
@@ -84,6 +89,30 @@ const VacancyForm = ({ initial, onClose, onSaved }) => {
   }, [initial]);
 
   const upd = (k, v) => setF((prev) => ({ ...prev, [k]: v }));
+
+  const [regenBusy, setRegenBusy] = useState(false);
+  const regenerateHindi = async () => {
+    if (!initial?.id) {
+      toast.error("Save the vacancy first, then regenerate Hindi.");
+      return;
+    }
+    setRegenBusy(true);
+    try {
+      const { data } = await adminApi.post(`/admin/vacancies/${initial.id}/hindi/regenerate`);
+      setF((prev) => ({
+        ...prev,
+        hindi_intro: data.hindi_intro || "",
+        hindi_description: data.hindi_description || "",
+        hindi_how_to_apply: data.hindi_how_to_apply || "",
+        hindi_selection_process: data.hindi_selection_process || "",
+      }));
+      toast.success(`Hindi regenerated (${data.hindi_source || "template"})`);
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || "Regeneration failed");
+    } finally {
+      setRegenBusy(false);
+    }
+  };
 
   // Important-links (label + url, or uploaded PDF) helpers
   const addLink = (type = "link") => setF((p) => ({ ...p, important_links: [...(p.important_links || []), { label: "", url: "", type }] }));
@@ -353,6 +382,37 @@ const VacancyForm = ({ initial, onClose, onSaved }) => {
               placeholder="Type job details… use the toolbar for bold, headings, bullet points and links."
             />
           </Field>
+
+          {/* Hindi descriptive content — auto-generated (templates + AI), editable */}
+          <div className="rounded-xl border-2 border-emerald-200 bg-emerald-50 p-4 space-y-3" data-testid="vacancy-form-hindi-card">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div>
+                <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-700">Hindi Content (हिंदी विवरण)</span>
+                <p className="text-[11px] text-slate-500 mt-0.5">Auto-generated (templates + AI). Edit to override; leave blank to auto-generate on first view.</p>
+              </div>
+              <button type="button" onClick={regenerateHindi} disabled={regenBusy}
+                className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-semibold"
+                data-testid="vacancy-form-hindi-regenerate">
+                {regenBusy ? "Generating…" : "Regenerate with AI"}
+              </button>
+            </div>
+            <Field label="Intro (परिचय)">
+              <textarea value={f.hindi_intro} onChange={(e) => upd("hindi_intro", e.target.value)}
+                rows={3} className={inputCls} placeholder="अभी खाली — पहली बार पेज खुलने पर auto-generate होगा" data-testid="vacancy-form-hindi-intro" />
+            </Field>
+            <Field label="Description (विवरण)">
+              <textarea value={f.hindi_description} onChange={(e) => upd("hindi_description", e.target.value)}
+                rows={5} className={inputCls} data-testid="vacancy-form-hindi-description" />
+            </Field>
+            <Field label="How to Apply (आवेदन कैसे करें)">
+              <textarea value={f.hindi_how_to_apply} onChange={(e) => upd("hindi_how_to_apply", e.target.value)}
+                rows={4} className={inputCls} data-testid="vacancy-form-hindi-how-to-apply" />
+            </Field>
+            <Field label="Selection Process (चयन प्रक्रिया)">
+              <textarea value={f.hindi_selection_process} onChange={(e) => upd("hindi_selection_process", e.target.value)}
+                rows={3} className={inputCls} data-testid="vacancy-form-hindi-selection" />
+            </Field>
+          </div>
 
           {/* Rank Math style SEO settings */}
           <div className="rounded-xl border-2 border-slate-200 bg-slate-50 p-4 space-y-3" data-testid="vacancy-form-seo-card">

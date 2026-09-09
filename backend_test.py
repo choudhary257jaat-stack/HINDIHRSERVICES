@@ -1,576 +1,445 @@
-"""Backend testing for SSR (Dynamic Rendering) + Sitemap endpoints.
-
-Tests the NEW SEO bug fix: SSR-for-bots that serves full HTML with real job listings
-to crawlers instead of empty SPA loader.
-"""
+#!/usr/bin/env python3
+"""Backend test for Hindi content generation feature (Hybrid templates + Gemini Flash LLM)."""
 import requests
+import re
 import json
-import xml.etree.ElementTree as ET
-from typing import Optional
+from typing import Dict, Any, Optional
 
-# Backend base URL from frontend/.env
+# Base URL from frontend/.env
 BASE_URL = "https://employee-hub-596.preview.emergentagent.com/api"
 
-# Test results tracking
-test_results = {
-    "passed": [],
-    "failed": [],
-    "warnings": []
+# Admin credentials (try first, fallback to second)
+ADMIN_CREDS = [
+    {"email": "admin@hrdigitalservices.in", "password": "Admin@12345"},
+    {"email": "admin@haryanaenterprises.com", "password": "Admin@12345"},
+]
+
+# Test results
+results = {
+    "passed": 0,
+    "failed": 0,
+    "tests": []
 }
 
-def log_pass(test_name: str, detail: str = ""):
-    msg = f"✅ {test_name}"
-    if detail:
-        msg += f": {detail}"
-    test_results["passed"].append(msg)
-    print(msg)
 
-def log_fail(test_name: str, detail: str):
-    msg = f"❌ {test_name}: {detail}"
-    test_results["failed"].append(msg)
-    print(msg)
+def log_test(name: str, passed: bool, details: str = ""):
+    """Log a test result."""
+    status = "✅ PASS" if passed else "❌ FAIL"
+    print(f"{status}: {name}")
+    if details:
+        print(f"  {details}")
+    results["tests"].append({"name": name, "passed": passed, "details": details})
+    if passed:
+        results["passed"] += 1
+    else:
+        results["failed"] += 1
 
-def log_warning(test_name: str, detail: str):
-    msg = f"⚠️  {test_name}: {detail}"
-    test_results["warnings"].append(msg)
-    print(msg)
 
-# ============================================================================
-# TEST 1: GET /api/render?path=/ with Googlebot UA
-# ============================================================================
-def test_render_home():
+def admin_login() -> Optional[requests.Session]:
+    """Login as admin and return session with cookies."""
+    for creds in ADMIN_CREDS:
+        session = requests.Session()
+        try:
+            resp = session.post(f"{BASE_URL}/auth/login", json=creds, timeout=15)
+            if resp.status_code == 200:
+                print(f"✅ Admin login successful with {creds['email']}")
+                return session
+        except Exception as e:
+            print(f"⚠️  Login attempt with {creds['email']} failed: {e}")
+    print("❌ All admin login attempts failed")
+    return None
+
+
+def has_devanagari(text: str) -> bool:
+    """Check if text contains Devanagari (Hindi) characters."""
+    if not text:
+        return False
+    # Unicode range for Devanagari: U+0900 to U+097F
+    return bool(re.search(r'[\u0900-\u097F]', text))
+
+
+def test_lazy_generation_and_cache(session: requests.Session):
+    """Test 1: LAZY GENERATION + CACHE (core)."""
     print("\n" + "="*80)
-    print("TEST 1: GET /api/render?path=/ (Googlebot UA)")
+    print("TEST 1: LAZY GENERATION + CACHE")
     print("="*80)
     
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
-    }
+    # Get vacancy list
+    resp = session.get(f"{BASE_URL}/vacancies?limit=5", timeout=15)
+    log_test("GET /api/vacancies?limit=5", resp.status_code == 200, f"Status: {resp.status_code}")
     
-    try:
-        resp = requests.get(f"{BASE_URL}/render?path=/", headers=headers, timeout=30)
-        
-        # Check status code
-        if resp.status_code != 200:
-            log_fail("render home status", f"Expected 200, got {resp.status_code}")
-            return
-        log_pass("render home status", "200 OK")
-        
-        # Check Content-Type
-        content_type = resp.headers.get("Content-Type", "")
-        if "text/html" not in content_type:
-            log_fail("render home content-type", f"Expected text/html, got {content_type}")
-            return
-        log_pass("render home content-type", "text/html")
-        
-        html = resp.text
-        
-        # Check for non-empty <title>
-        if "<title>" not in html or "</title>" not in html:
-            log_fail("render home title", "No <title> tag found")
-            return
-        title_start = html.find("<title>") + 7
-        title_end = html.find("</title>")
-        title = html[title_start:title_end].strip()
-        if not title or len(title) < 5:
-            log_fail("render home title", f"Title is empty or too short: '{title}'")
-            return
-        log_pass("render home title", f"Non-empty title found: '{title[:60]}...'")
-        
-        # Check for meta description
-        if '<meta name="description"' not in html:
-            log_fail("render home meta description", "No meta description found")
-            return
-        log_pass("render home meta description", "Found")
-        
-        # Check for canonical link
-        if '<link rel="canonical"' not in html:
-            log_fail("render home canonical", "No canonical link found")
-            return
-        log_pass("render home canonical", "Found")
-        
-        # Check for OG tags
-        if 'property="og:title"' not in html:
-            log_fail("render home og:title", "No og:title found")
-            return
-        log_pass("render home og:title", "Found")
-        
-        if 'property="og:description"' not in html:
-            log_fail("render home og:description", "No og:description found")
-            return
-        log_pass("render home og:description", "Found")
-        
-        # Check for Twitter card
-        if 'name="twitter:card"' not in html:
-            log_fail("render home twitter:card", "No twitter:card found")
-            return
-        log_pass("render home twitter:card", "Found")
-        
-        # CRITICAL: Check for REAL job listing content (not just loader)
-        # Look for multiple job entries with links to /vacancies/
-        job_count = html.count('class="job"')
-        vacancy_links = html.count('/vacancies/')
-        
-        if job_count < 5:
-            log_fail("render home job listings", f"Expected multiple job entries, found only {job_count}")
-            return
-        log_pass("render home job listings", f"Found {job_count} job entries")
-        
-        if vacancy_links < 5:
-            log_fail("render home vacancy links", f"Expected multiple /vacancies/ links, found only {vacancy_links}")
-            return
-        log_pass("render home vacancy links", f"Found {vacancy_links} vacancy links")
-        
-        # Check that it's not just a loader/empty root
-        if "Loading" in html or "loading" in html:
-            log_warning("render home loader", "HTML contains 'Loading' text - may be showing loader")
-        
-        if len(html) < 5000:
-            log_warning("render home size", f"HTML is only {len(html)} bytes - may be incomplete")
-        else:
-            log_pass("render home size", f"{len(html)} bytes - substantial content")
-        
-    except Exception as e:
-        log_fail("render home", f"Exception: {str(e)}")
+    if resp.status_code != 200:
+        log_test("Lazy generation test", False, "Cannot get vacancy list")
+        return None
+    
+    data = resp.json()
+    items = data.get("items", []) if isinstance(data, dict) else data
+    
+    if not items:
+        log_test("Lazy generation test", False, "No vacancies found")
+        return None
+    
+    vacancy_id = items[0].get("id")
+    log_test("Extract vacancy ID", bool(vacancy_id), f"ID: {vacancy_id}")
+    
+    # First GET - should trigger lazy generation
+    print(f"\n📝 First GET /api/vacancies/{vacancy_id} (should trigger lazy generation)")
+    resp1 = session.get(f"{BASE_URL}/vacancies/{vacancy_id}", timeout=20)
+    log_test("First GET /api/vacancies/{id}", resp1.status_code == 200, f"Status: {resp1.status_code}")
+    
+    if resp1.status_code != 200:
+        log_test("Lazy generation test", False, f"First GET failed: {resp1.status_code}")
+        return None
+    
+    v1 = resp1.json()
+    
+    # Check all required Hindi fields are present and non-empty
+    required_fields = ["hindi_intro", "hindi_description", "hindi_how_to_apply", 
+                      "hindi_selection_process", "hindi_source", "hindi_generated_at"]
+    
+    for field in required_fields:
+        value = v1.get(field)
+        is_present = value is not None and (isinstance(value, str) and value.strip() or not isinstance(value, str))
+        log_test(f"Field '{field}' present and non-empty", is_present, 
+                f"Value: {str(value)[:100] if value else 'None'}")
+    
+    # Check hindi_source is either 'llm' or 'template'
+    hindi_source = v1.get("hindi_source")
+    valid_source = hindi_source in ("llm", "template")
+    log_test("hindi_source is 'llm' or 'template'", valid_source, f"Value: {hindi_source}")
+    
+    # Check Hindi fields contain Devanagari characters
+    hindi_fields = ["hindi_intro", "hindi_description", "hindi_how_to_apply", "hindi_selection_process"]
+    for field in hindi_fields:
+        text = v1.get(field, "")
+        has_hindi = has_devanagari(text)
+        log_test(f"'{field}' contains Devanagari characters", has_hindi, 
+                f"Sample: {text[:80] if text else 'Empty'}")
+    
+    # Check for junk in intro (like 'PER/0106/...')
+    intro = v1.get("hindi_intro", "")
+    has_junk = bool(re.search(r'PER/\d+/', intro))
+    log_test("hindi_intro does NOT contain junk like 'PER/0106/...'", not has_junk, 
+            f"Intro: {intro[:100]}")
+    
+    # Second GET - should return cached content (same hindi_generated_at and hindi_intro)
+    print(f"\n📝 Second GET /api/vacancies/{vacancy_id} (should return cached content)")
+    resp2 = session.get(f"{BASE_URL}/vacancies/{vacancy_id}", timeout=15)
+    log_test("Second GET /api/vacancies/{id}", resp2.status_code == 200, f"Status: {resp2.status_code}")
+    
+    if resp2.status_code != 200:
+        log_test("Cache test", False, f"Second GET failed: {resp2.status_code}")
+        return vacancy_id
+    
+    v2 = resp2.json()
+    
+    # Compare hindi_generated_at
+    gen_at_1 = v1.get("hindi_generated_at")
+    gen_at_2 = v2.get("hindi_generated_at")
+    cache_time_match = gen_at_1 == gen_at_2
+    log_test("hindi_generated_at is identical (cached)", cache_time_match, 
+            f"First: {gen_at_1}, Second: {gen_at_2}")
+    
+    # Compare hindi_intro
+    intro_1 = v1.get("hindi_intro")
+    intro_2 = v2.get("hindi_intro")
+    cache_intro_match = intro_1 == intro_2
+    log_test("hindi_intro is identical (cached)", cache_intro_match, 
+            f"Match: {intro_1 == intro_2}")
+    
+    return vacancy_id
 
-# ============================================================================
-# TEST 2: GET /api/render?path=/vacancies/{id} with social crawler UA
-# ============================================================================
-def test_render_vacancy_detail():
+
+def test_structured_facts_stay_english(session: requests.Session, vacancy_id: str):
+    """Test 2: STRUCTURED FACTS STAY ENGLISH."""
     print("\n" + "="*80)
-    print("TEST 2: GET /api/render?path=/vacancies/{id} (Facebook UA)")
+    print("TEST 2: STRUCTURED FACTS STAY ENGLISH")
     print("="*80)
     
-    # First, get a valid vacancy ID
-    try:
-        resp = requests.get(f"{BASE_URL}/vacancies?limit=1", timeout=15)
-        if resp.status_code != 200:
-            log_fail("get vacancy id", f"Failed to fetch vacancies: {resp.status_code}")
-            return
-        
-        data = resp.json()
-        # Response may be a list or a dict with "items"
-        if isinstance(data, list):
-            items = data
-        elif isinstance(data, dict) and "items" in data:
-            items = data["items"]
-        else:
-            log_fail("get vacancy id", f"Unexpected response format: {type(data)}")
-            return
-        
-        if not items:
-            log_fail("get vacancy id", "No vacancies found in database")
-            return
-        
-        vacancy_id = items[0].get("id")
-        if not vacancy_id:
-            log_fail("get vacancy id", "Vacancy has no 'id' field")
-            return
-        
-        log_pass("get vacancy id", f"Got vacancy ID: {vacancy_id}")
-        
-    except Exception as e:
-        log_fail("get vacancy id", f"Exception: {str(e)}")
+    resp = session.get(f"{BASE_URL}/vacancies/{vacancy_id}", timeout=15)
+    log_test("GET /api/vacancies/{id}", resp.status_code == 200, f"Status: {resp.status_code}")
+    
+    if resp.status_code != 200:
         return
     
-    # Now test the render endpoint
-    headers = {
-        "User-Agent": "facebookexternalhit/1.1"
+    v = resp.json()
+    
+    # Check that structured fields remain in English (not translated to Hindi)
+    english_fields = ["title", "organization", "qualification", "last_date_text"]
+    
+    for field in english_fields:
+        value = v.get(field, "")
+        if not value:
+            log_test(f"'{field}' check (empty field)", True, "Field is empty, skipping")
+            continue
+        
+        # Check if field is NOT primarily Devanagari (should be English)
+        # Allow some Hindi but majority should be English/Latin script
+        devanagari_chars = len(re.findall(r'[\u0900-\u097F]', value))
+        total_chars = len(re.sub(r'\s', '', value))
+        
+        if total_chars == 0:
+            log_test(f"'{field}' stays English", True, "Field is whitespace only")
+            continue
+        
+        devanagari_ratio = devanagari_chars / total_chars if total_chars > 0 else 0
+        is_english = devanagari_ratio < 0.5  # Less than 50% Devanagari = English
+        
+        log_test(f"'{field}' stays English (not translated)", is_english, 
+                f"Value: {value[:80]}, Devanagari ratio: {devanagari_ratio:.2%}")
+
+
+def test_admin_regenerate(session: requests.Session, vacancy_id: str):
+    """Test 3: ADMIN REGENERATE."""
+    print("\n" + "="*80)
+    print("TEST 3: ADMIN REGENERATE")
+    print("="*80)
+    
+    # Test regenerate with valid ID
+    print(f"\n📝 POST /api/admin/vacancies/{vacancy_id}/hindi/regenerate")
+    resp = session.post(f"{BASE_URL}/admin/vacancies/{vacancy_id}/hindi/regenerate", timeout=30)
+    log_test("POST regenerate with valid ID", resp.status_code == 200, f"Status: {resp.status_code}")
+    
+    if resp.status_code == 200:
+        data = resp.json()
+        
+        # Check response contains Hindi fields
+        has_hindi_intro = bool(data.get("hindi_intro"))
+        has_hindi_desc = bool(data.get("hindi_description"))
+        has_hindi_apply = bool(data.get("hindi_how_to_apply"))
+        has_hindi_selection = bool(data.get("hindi_selection_process"))
+        has_source = data.get("hindi_source") in ("llm", "template")
+        
+        log_test("Response contains hindi_intro", has_hindi_intro, f"Length: {len(data.get('hindi_intro', ''))}")
+        log_test("Response contains hindi_description", has_hindi_desc, f"Length: {len(data.get('hindi_description', ''))}")
+        log_test("Response contains hindi_how_to_apply", has_hindi_apply, f"Length: {len(data.get('hindi_how_to_apply', ''))}")
+        log_test("Response contains hindi_selection_process", has_hindi_selection, f"Length: {len(data.get('hindi_selection_process', ''))}")
+        log_test("Response contains valid hindi_source", has_source, f"Value: {data.get('hindi_source')}")
+    
+    # Test regenerate with invalid ID (malformed)
+    print(f"\n📝 POST /api/admin/vacancies/xxxxxxxx/hindi/regenerate (invalid ID)")
+    resp_invalid = session.post(f"{BASE_URL}/admin/vacancies/xxxxxxxx/hindi/regenerate", timeout=15)
+    is_error = resp_invalid.status_code in (400, 404)
+    log_test("POST regenerate with invalid ID returns 400/404", is_error, 
+            f"Status: {resp_invalid.status_code} (expected 400 or 404)")
+    
+    # Test regenerate with well-formed but non-existent 24-hex ID
+    fake_id = "a" * 24
+    print(f"\n📝 POST /api/admin/vacancies/{fake_id}/hindi/regenerate (non-existent ID)")
+    resp_notfound = session.post(f"{BASE_URL}/admin/vacancies/{fake_id}/hindi/regenerate", timeout=15)
+    is_404 = resp_notfound.status_code == 404
+    log_test("POST regenerate with non-existent ID returns 404", is_404, 
+            f"Status: {resp_notfound.status_code} (expected 404)")
+
+
+def test_admin_edit_override_persists(session: requests.Session, vacancy_id: str):
+    """Test 4: ADMIN EDIT/OVERRIDE PERSISTS (does not get wiped)."""
+    print("\n" + "="*80)
+    print("TEST 4: ADMIN EDIT/OVERRIDE PERSISTS")
+    print("="*80)
+    
+    # Get current vacancy details
+    resp = session.get(f"{BASE_URL}/vacancies/{vacancy_id}", timeout=15)
+    if resp.status_code != 200:
+        log_test("Get vacancy for edit test", False, f"Cannot get vacancy: {resp.status_code}")
+        return
+    
+    v = resp.json()
+    original_title = v.get("title", "Test Vacancy")
+    
+    # Step 1: PUT with custom hindi_intro
+    custom_intro = "मेरा कस्टम हिंदी परिचय टेस्ट"
+    print(f"\n📝 PUT /api/admin/vacancies/{vacancy_id} with custom hindi_intro")
+    
+    payload = {
+        "title": original_title,  # Reuse existing title
+        "hindi_intro": custom_intro,
+        "organization": v.get("organization", "Test Org"),
+        "category": v.get("category", "other"),
     }
     
-    try:
-        resp = requests.get(f"{BASE_URL}/render?path=/vacancies/{vacancy_id}", headers=headers, timeout=30)
-        
-        # Check status code
-        if resp.status_code != 200:
-            log_fail("render vacancy status", f"Expected 200, got {resp.status_code}")
-            return
-        log_pass("render vacancy status", "200 OK")
-        
-        # Check Content-Type
-        content_type = resp.headers.get("Content-Type", "")
-        if "text/html" not in content_type:
-            log_fail("render vacancy content-type", f"Expected text/html, got {content_type}")
-            return
-        log_pass("render vacancy content-type", "text/html")
-        
-        html = resp.text
-        
-        # Check for JobPosting JSON-LD
-        if 'application/ld+json' not in html:
-            log_fail("render vacancy json-ld", "No JSON-LD script found")
-            return
-        
-        if '"@type":"JobPosting"' not in html and '"@type": "JobPosting"' not in html:
-            log_fail("render vacancy JobPosting", "No JobPosting schema found in JSON-LD")
-            return
-        log_pass("render vacancy JobPosting", "Found JobPosting JSON-LD schema")
-        
-        # Check for OG tags
-        if 'property="og:title"' not in html:
-            log_fail("render vacancy og:title", "No og:title found")
-            return
-        log_pass("render vacancy og:title", "Found")
-        
-        if 'property="og:image"' not in html:
-            log_fail("render vacancy og:image", "No og:image found")
-            return
-        log_pass("render vacancy og:image", "Found")
-        
-        # Check for <h1> with post name
-        if "<h1>" not in html:
-            log_fail("render vacancy h1", "No <h1> tag found")
-            return
-        log_pass("render vacancy h1", "Found <h1> tag")
-        
-        # Check for unique title
-        if "<title>" not in html:
-            log_fail("render vacancy title", "No <title> tag found")
-            return
-        title_start = html.find("<title>") + 7
-        title_end = html.find("</title>")
-        title = html[title_start:title_end].strip()
-        if not title:
-            log_fail("render vacancy title", "Title is empty")
-            return
-        log_pass("render vacancy title", f"Unique title: '{title[:60]}...'")
-        
-        # Check for canonical link
-        if '<link rel="canonical"' not in html:
-            log_fail("render vacancy canonical", "No canonical link found")
-            return
-        log_pass("render vacancy canonical", "Found")
-        
-    except Exception as e:
-        log_fail("render vacancy", f"Exception: {str(e)}")
-
-# ============================================================================
-# TEST 3: GET /api/render?path=/faq
-# ============================================================================
-def test_render_faq():
-    print("\n" + "="*80)
-    print("TEST 3: GET /api/render?path=/faq")
-    print("="*80)
+    resp_put = session.put(f"{BASE_URL}/admin/vacancies/{vacancy_id}", json=payload, timeout=15)
+    log_test("PUT with custom hindi_intro", resp_put.status_code == 200, f"Status: {resp_put.status_code}")
     
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+    # Step 2: GET and verify custom intro is saved
+    print(f"\n📝 GET /api/vacancies/{vacancy_id} (verify custom intro)")
+    resp_get1 = session.get(f"{BASE_URL}/vacancies/{vacancy_id}", timeout=15)
+    log_test("GET after PUT", resp_get1.status_code == 200, f"Status: {resp_get1.status_code}")
+    
+    if resp_get1.status_code == 200:
+        v1 = resp_get1.json()
+        intro_matches = v1.get("hindi_intro") == custom_intro
+        is_edited = v1.get("hindi_edited") == True
+        
+        log_test("hindi_intro equals custom value", intro_matches, 
+                f"Expected: '{custom_intro}', Got: '{v1.get('hindi_intro', '')[:100]}'")
+        log_test("hindi_edited is True", is_edited, f"Value: {v1.get('hindi_edited')}")
+    
+    # Step 3: GET again to verify it's still there (lazy generation must NOT overwrite)
+    print(f"\n📝 GET /api/vacancies/{vacancy_id} AGAIN (verify persistence)")
+    resp_get2 = session.get(f"{BASE_URL}/vacancies/{vacancy_id}", timeout=15)
+    log_test("GET again", resp_get2.status_code == 200, f"Status: {resp_get2.status_code}")
+    
+    if resp_get2.status_code == 200:
+        v2 = resp_get2.json()
+        intro_still_matches = v2.get("hindi_intro") == custom_intro
+        log_test("Custom hindi_intro STILL persists (not overwritten)", intro_still_matches, 
+                f"Value: '{v2.get('hindi_intro', '')[:100]}'")
+    
+    # Step 4: PUT again WITHOUT hindi fields (just title) - should preserve Hindi
+    print(f"\n📝 PUT /api/admin/vacancies/{vacancy_id} WITHOUT hindi fields")
+    payload_no_hindi = {
+        "title": original_title,
+        "organization": v.get("organization", "Test Org"),
+        "category": v.get("category", "other"),
     }
     
-    try:
-        resp = requests.get(f"{BASE_URL}/render?path=/faq", headers=headers, timeout=30)
-        
-        # Check status code
-        if resp.status_code != 200:
-            log_fail("render faq status", f"Expected 200, got {resp.status_code}")
-            return
-        log_pass("render faq status", "200 OK")
-        
-        # Check Content-Type
-        content_type = resp.headers.get("Content-Type", "")
-        if "text/html" not in content_type:
-            log_fail("render faq content-type", f"Expected text/html, got {content_type}")
-            return
-        log_pass("render faq content-type", "text/html")
-        
-        html = resp.text
-        
-        # Check for FAQPage JSON-LD (if FAQs exist)
-        if 'application/ld+json' in html:
-            if '"@type":"FAQPage"' in html or '"@type": "FAQPage"' in html:
-                log_pass("render faq FAQPage", "Found FAQPage JSON-LD schema")
-            else:
-                log_warning("render faq FAQPage", "JSON-LD found but not FAQPage type")
-        else:
-            log_warning("render faq FAQPage", "No JSON-LD found (may be no FAQs in DB)")
-        
-        # Check it renders without error
-        if "<title>" in html and len(html) > 1000:
-            log_pass("render faq content", "Page renders successfully")
-        else:
-            log_warning("render faq content", "Page may be incomplete")
-        
-    except Exception as e:
-        log_fail("render faq", f"Exception: {str(e)}")
+    resp_put2 = session.put(f"{BASE_URL}/admin/vacancies/{vacancy_id}", json=payload_no_hindi, timeout=15)
+    log_test("PUT without hindi fields", resp_put2.status_code == 200, f"Status: {resp_put2.status_code}")
+    
+    # Step 5: GET and verify custom intro is STILL preserved
+    print(f"\n📝 GET /api/vacancies/{vacancy_id} (verify Hindi preserved after normal edit)")
+    resp_get3 = session.get(f"{BASE_URL}/vacancies/{vacancy_id}", timeout=15)
+    log_test("GET after PUT without hindi", resp_get3.status_code == 200, f"Status: {resp_get3.status_code}")
+    
+    if resp_get3.status_code == 200:
+        v3 = resp_get3.json()
+        intro_preserved = v3.get("hindi_intro") == custom_intro
+        log_test("Custom hindi_intro PRESERVED after normal edit", intro_preserved, 
+                f"Value: '{v3.get('hindi_intro', '')[:100]}'")
 
-# ============================================================================
-# TEST 4: GET /api/render?path=/some-nonexistent-route-xyz (expect 404)
-# ============================================================================
-def test_render_nonexistent():
+
+def test_ssr_match(session: requests.Session, vacancy_id: str):
+    """Test 5: SSR MATCH."""
     print("\n" + "="*80)
-    print("TEST 4: GET /api/render?path=/some-nonexistent-route-xyz (expect 404)")
+    print("TEST 5: SSR MATCH")
     print("="*80)
     
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
-    }
+    # Get the vacancy detail first to know what Hindi content to expect
+    resp_detail = session.get(f"{BASE_URL}/vacancies/{vacancy_id}", timeout=15)
+    if resp_detail.status_code != 200:
+        log_test("Get vacancy for SSR test", False, f"Cannot get vacancy: {resp_detail.status_code}")
+        return
     
-    try:
-        resp = requests.get(f"{BASE_URL}/render?path=/some-nonexistent-route-xyz", headers=headers, timeout=30)
+    v = resp_detail.json()
+    expected_hindi_desc = v.get("hindi_description", "")
+    
+    # GET SSR with Facebook bot user-agent
+    print(f"\n📝 GET /api/render?path=/vacancies/{vacancy_id} with Facebook bot UA")
+    headers = {"User-Agent": "facebookexternalhit/1.1"}
+    resp_ssr = session.get(f"{BASE_URL}/render?path=/vacancies/{vacancy_id}", headers=headers, timeout=20)
+    
+    log_test("GET /api/render with bot UA", resp_ssr.status_code == 200, f"Status: {resp_ssr.status_code}")
+    
+    if resp_ssr.status_code != 200:
+        log_test("SSR test", False, f"SSR endpoint failed: {resp_ssr.status_code}")
+        return
+    
+    html = resp_ssr.text
+    
+    # Check content-type is text/html
+    content_type = resp_ssr.headers.get("Content-Type", "")
+    is_html = "text/html" in content_type
+    log_test("Content-Type is text/html", is_html, f"Value: {content_type}")
+    
+    # Check for JobPosting JSON-LD schema
+    has_job_posting = "JobPosting" in html and "application/ld+json" in html
+    log_test("HTML contains JobPosting application/ld+json", has_job_posting, 
+            f"Found: {has_job_posting}")
+    
+    # Extract JSON-LD and check description contains Devanagari
+    if has_job_posting:
+        # Find all JSON-LD blocks
+        json_ld_pattern = r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>'
+        json_ld_blocks = re.findall(json_ld_pattern, html, re.DOTALL | re.IGNORECASE)
         
-        # Must be 404, NOT 500
-        if resp.status_code == 404:
-            log_pass("render nonexistent status", "404 as expected (unsupported route)")
-        elif resp.status_code == 500:
-            log_fail("render nonexistent status", "Got 500 instead of 404 - should return 404 for unsupported routes")
-        else:
-            log_fail("render nonexistent status", f"Expected 404, got {resp.status_code}")
+        job_posting_found = False
+        for block in json_ld_blocks:
+            try:
+                data = json.loads(block)
+                if data.get("@type") == "JobPosting":
+                    job_posting_found = True
+                    description = data.get("description", "")
+                    has_hindi_in_schema = has_devanagari(description)
+                    log_test("JobPosting description contains Devanagari Hindi", has_hindi_in_schema, 
+                            f"Sample: {description[:100]}")
+                    break
+            except json.JSONDecodeError:
+                continue
         
-    except Exception as e:
-        log_fail("render nonexistent", f"Exception: {str(e)}")
+        if not job_posting_found:
+            log_test("JobPosting JSON-LD found and parsed", False, "Could not find or parse JobPosting")
+    
+    # Check visible body contains Hindi section headings
+    hindi_headings = ["विवरण", "आवेदन कैसे करें", "चयन प्रक्रिया"]
+    for heading in hindi_headings:
+        has_heading = heading in html
+        log_test(f"HTML body contains Hindi heading '{heading}'", has_heading, 
+                f"Found: {has_heading}")
+    
+    # Check that visible Hindi content matches the API response
+    if expected_hindi_desc:
+        # Extract a sample from expected Hindi description (first 50 chars)
+        sample = expected_hindi_desc[:50].strip()
+        if sample:
+            # Check if this sample appears in the HTML (allowing for HTML encoding)
+            sample_in_html = sample in html
+            log_test("SSR HTML contains sample from hindi_description", sample_in_html, 
+                    f"Sample: {sample}")
 
-# ============================================================================
-# TEST 5: GET /api/sitemap.xml
-# ============================================================================
-def test_sitemap_xml():
-    print("\n" + "="*80)
-    print("TEST 5: GET /api/sitemap.xml")
-    print("="*80)
-    
-    try:
-        resp = requests.get(f"{BASE_URL}/sitemap.xml", timeout=30)
-        
-        # Check status code
-        if resp.status_code != 200:
-            log_fail("sitemap status", f"Expected 200, got {resp.status_code}")
-            return
-        log_pass("sitemap status", "200 OK")
-        
-        # Check Content-Type
-        content_type = resp.headers.get("Content-Type", "")
-        if "application/xml" not in content_type and "text/xml" not in content_type:
-            log_fail("sitemap content-type", f"Expected application/xml, got {content_type}")
-            return
-        log_pass("sitemap content-type", "application/xml")
-        
-        xml_content = resp.text
-        
-        # Check for valid XML structure
-        if "<urlset" not in xml_content:
-            log_fail("sitemap urlset", "No <urlset> tag found")
-            return
-        log_pass("sitemap urlset", "Found <urlset> tag")
-        
-        # Count <loc> entries
-        loc_count = xml_content.count("<loc>")
-        if loc_count < 10:
-            log_fail("sitemap loc count", f"Expected many <loc> entries (hundreds), found only {loc_count}")
-            return
-        log_pass("sitemap loc count", f"Found {loc_count} <loc> entries")
-        
-        # Check for static pages
-        static_pages = ["/services", "/solar", "/faq"]
-        found_static = sum(1 for page in static_pages if page in xml_content)
-        if found_static < 2:
-            log_warning("sitemap static pages", f"Expected static pages, found only {found_static}")
-        else:
-            log_pass("sitemap static pages", f"Found {found_static} static pages")
-        
-        # Check for vacancy URLs
-        if "/vacancies/" not in xml_content:
-            log_fail("sitemap vacancy urls", "No /vacancies/ URLs found")
-            return
-        vacancy_url_count = xml_content.count("/vacancies/")
-        log_pass("sitemap vacancy urls", f"Found {vacancy_url_count} vacancy URLs")
-        
-        # Check for blog URLs (if any)
-        if "/blogs/" in xml_content:
-            blog_url_count = xml_content.count("/blogs/")
-            log_pass("sitemap blog urls", f"Found {blog_url_count} blog URLs")
-        else:
-            log_warning("sitemap blog urls", "No blog URLs found (may be no published blogs)")
-        
-        # Try to parse as XML
-        try:
-            ET.fromstring(xml_content)
-            log_pass("sitemap xml parse", "Valid XML structure")
-        except ET.ParseError as e:
-            log_fail("sitemap xml parse", f"Invalid XML: {str(e)}")
-        
-    except Exception as e:
-        log_fail("sitemap", f"Exception: {str(e)}")
 
-# ============================================================================
-# TEST 6: GET /api/sitemap-vacancies.xml
-# ============================================================================
-def test_sitemap_vacancies_xml():
-    print("\n" + "="*80)
-    print("TEST 6: GET /api/sitemap-vacancies.xml")
-    print("="*80)
-    
-    try:
-        resp = requests.get(f"{BASE_URL}/sitemap-vacancies.xml", timeout=30)
-        
-        # Check status code
-        if resp.status_code != 200:
-            log_fail("sitemap-vacancies status", f"Expected 200, got {resp.status_code}")
-            return
-        log_pass("sitemap-vacancies status", "200 OK")
-        
-        # Check Content-Type
-        content_type = resp.headers.get("Content-Type", "")
-        if "application/xml" not in content_type and "text/xml" not in content_type:
-            log_fail("sitemap-vacancies content-type", f"Expected application/xml, got {content_type}")
-            return
-        log_pass("sitemap-vacancies content-type", "application/xml")
-        
-        xml_content = resp.text
-        
-        # Check for valid XML structure
-        if "<urlset" not in xml_content:
-            log_fail("sitemap-vacancies urlset", "No <urlset> tag found")
-            return
-        log_pass("sitemap-vacancies urlset", "Found <urlset> tag")
-        
-        # Check for vacancy URLs
-        if "/vacancies/" not in xml_content:
-            log_fail("sitemap-vacancies vacancy urls", "No /vacancies/ URLs found")
-            return
-        vacancy_url_count = xml_content.count("/vacancies/")
-        log_pass("sitemap-vacancies vacancy urls", f"Found {vacancy_url_count} vacancy URLs")
-        
-        # Try to parse as XML
-        try:
-            ET.fromstring(xml_content)
-            log_pass("sitemap-vacancies xml parse", "Valid XML structure")
-        except ET.ParseError as e:
-            log_fail("sitemap-vacancies xml parse", f"Invalid XML: {str(e)}")
-        
-    except Exception as e:
-        log_fail("sitemap-vacancies", f"Exception: {str(e)}")
-
-# ============================================================================
-# TEST 7: GET /api/robots.txt
-# ============================================================================
-def test_robots_txt():
-    print("\n" + "="*80)
-    print("TEST 7: GET /api/robots.txt")
-    print("="*80)
-    
-    try:
-        resp = requests.get(f"{BASE_URL}/robots.txt", timeout=15)
-        
-        # Check status code
-        if resp.status_code != 200:
-            log_fail("robots.txt status", f"Expected 200, got {resp.status_code}")
-            return
-        log_pass("robots.txt status", "200 OK")
-        
-        # Check Content-Type
-        content_type = resp.headers.get("Content-Type", "")
-        if "text/plain" not in content_type:
-            log_fail("robots.txt content-type", f"Expected text/plain, got {content_type}")
-            return
-        log_pass("robots.txt content-type", "text/plain")
-        
-        content = resp.text
-        
-        # Check for "Allow: /api/sitemap.xml"
-        if "Allow: /api/sitemap.xml" not in content:
-            log_fail("robots.txt allow sitemap", "Missing 'Allow: /api/sitemap.xml' line")
-            return
-        log_pass("robots.txt allow sitemap", "Found 'Allow: /api/sitemap.xml'")
-        
-        # Check for "Sitemap: " pointing to /api/sitemap.xml
-        if "Sitemap:" not in content or "/api/sitemap.xml" not in content:
-            log_fail("robots.txt sitemap directive", "Missing 'Sitemap: .../api/sitemap.xml' line")
-            return
-        log_pass("robots.txt sitemap directive", "Found 'Sitemap: .../api/sitemap.xml'")
-        
-        # Check for "Disallow: /api/"
-        if "Disallow: /api/" not in content:
-            log_fail("robots.txt disallow api", "Missing 'Disallow: /api/' line")
-            return
-        log_pass("robots.txt disallow api", "Found 'Disallow: /api/'")
-        
-    except Exception as e:
-        log_fail("robots.txt", f"Exception: {str(e)}")
-
-# ============================================================================
-# TEST 8: Regression sanity checks
-# ============================================================================
-def test_regression_sanity():
-    print("\n" + "="*80)
-    print("TEST 8: Regression sanity checks")
-    print("="*80)
-    
-    # Test GET /api/vacancies?limit=5
-    try:
-        resp = requests.get(f"{BASE_URL}/vacancies?limit=5", timeout=15)
-        if resp.status_code != 200:
-            log_fail("regression vacancies", f"GET /api/vacancies?limit=5 returned {resp.status_code}")
-        else:
-            data = resp.json()
-            if isinstance(data, dict) and "items" in data:
-                items = data["items"]
-            elif isinstance(data, list):
-                items = data
-            else:
-                log_fail("regression vacancies", f"Unexpected response format: {type(data)}")
-                return
-            
-            if len(items) > 0:
-                log_pass("regression vacancies", f"GET /api/vacancies?limit=5 returned {len(items)} items")
-            else:
-                log_warning("regression vacancies", "GET /api/vacancies?limit=5 returned 0 items")
-    except Exception as e:
-        log_fail("regression vacancies", f"Exception: {str(e)}")
-    
-    # Test GET /api/
-    try:
-        resp = requests.get(f"{BASE_URL}/", timeout=15)
-        if resp.status_code != 200:
-            log_fail("regression api root", f"GET /api/ returned {resp.status_code}")
-        else:
-            data = resp.json()
-            if "message" in data or "status" in data:
-                log_pass("regression api root", f"GET /api/ returned ok message: {data}")
-            else:
-                log_warning("regression api root", f"GET /api/ returned unexpected format: {data}")
-    except Exception as e:
-        log_fail("regression api root", f"Exception: {str(e)}")
-
-# ============================================================================
-# MAIN
-# ============================================================================
 def main():
-    print("\n" + "="*80)
-    print("BACKEND TESTING: SSR (Dynamic Rendering) + Sitemap Endpoints")
-    print("Testing NEW SEO bug fix: SSR-for-bots serving full HTML with real job listings")
+    """Run all tests."""
     print("="*80)
+    print("HINDI CONTENT GENERATION BACKEND TESTS")
+    print("="*80)
+    print(f"Base URL: {BASE_URL}")
+    print()
     
-    # Run all tests
-    test_render_home()
-    test_render_vacancy_detail()
-    test_render_faq()
-    test_render_nonexistent()
-    test_sitemap_xml()
-    test_sitemap_vacancies_xml()
-    test_robots_txt()
-    test_regression_sanity()
+    # Login as admin
+    session = admin_login()
+    if not session:
+        print("\n❌ CRITICAL: Admin login failed. Cannot proceed with tests.")
+        return
+    
+    # Test 1: Lazy generation and cache
+    vacancy_id = test_lazy_generation_and_cache(session)
+    
+    if not vacancy_id:
+        print("\n❌ CRITICAL: Could not get vacancy ID. Stopping tests.")
+        return
+    
+    # Test 2: Structured facts stay English
+    test_structured_facts_stay_english(session, vacancy_id)
+    
+    # Test 3: Admin regenerate
+    test_admin_regenerate(session, vacancy_id)
+    
+    # Test 4: Admin edit/override persists
+    test_admin_edit_override_persists(session, vacancy_id)
+    
+    # Test 5: SSR match
+    test_ssr_match(session, vacancy_id)
     
     # Print summary
     print("\n" + "="*80)
     print("TEST SUMMARY")
     print("="*80)
-    print(f"\n✅ PASSED: {len(test_results['passed'])}")
-    for msg in test_results['passed']:
-        print(f"  {msg}")
+    print(f"✅ Passed: {results['passed']}")
+    print(f"❌ Failed: {results['failed']}")
+    print(f"📊 Total: {results['passed'] + results['failed']}")
+    print()
     
-    if test_results['warnings']:
-        print(f"\n⚠️  WARNINGS: {len(test_results['warnings'])}")
-        for msg in test_results['warnings']:
-            print(f"  {msg}")
-    
-    if test_results['failed']:
-        print(f"\n❌ FAILED: {len(test_results['failed'])}")
-        for msg in test_results['failed']:
-            print(f"  {msg}")
+    if results['failed'] > 0:
+        print("❌ FAILED TESTS:")
+        for test in results['tests']:
+            if not test['passed']:
+                print(f"  - {test['name']}")
+                if test['details']:
+                    print(f"    {test['details']}")
     else:
-        print("\n🎉 ALL TESTS PASSED!")
-    
-    print("\n" + "="*80)
-    print(f"TOTAL: {len(test_results['passed'])} passed, {len(test_results['failed'])} failed, {len(test_results['warnings'])} warnings")
-    print("="*80)
+        print("🎉 ALL TESTS PASSED!")
+
 
 if __name__ == "__main__":
     main()

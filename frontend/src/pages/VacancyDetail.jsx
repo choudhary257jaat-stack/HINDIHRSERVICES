@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import api from "@/lib/api";
-import { enhanceHtml } from "@/lib/htmlContent";
+import { enhanceHtml, renderRichText } from "@/lib/htmlContent";
 import { useI18n } from "@/context/I18nContext";
 import {
   FaArrowLeft, FaCalendarAlt, FaBuilding, FaGraduationCap, FaClock,
@@ -136,11 +136,15 @@ const VacancyDetail = () => {
     const yyyy = y.length === 2 ? `20${y}` : y;
     return `${yyyy}-${mo.padStart(2, "0")}-${d.padStart(2, "0")}`;
   };
+  const hindiSchemaDesc = [v.hindi_intro, v.hindi_description, v.hindi_how_to_apply, v.hindi_selection_process]
+    .filter(Boolean)
+    .map((t) => String(t).split("\n").filter(Boolean).map((p) => `<p>${p}</p>`).join(""))
+    .join("");
   const jobPostingJsonLd = {
     "@context": "https://schema.org",
     "@type": "JobPosting",
     title: v.post_name || v.title || "Government Vacancy",
-    description: (v.title || v.post_name || "") + (v.qualification ? ` — Qualification: ${v.qualification}` : ""),
+    description: hindiSchemaDesc || ((v.title || v.post_name || "") + (v.qualification ? ` — Qualification: ${v.qualification}` : "")),
     identifier: {
       "@type": "PropertyValue",
       name: v.organization || "Government",
@@ -278,10 +282,12 @@ const VacancyDetail = () => {
           {v.heading || v.title}
         </h1>
 
-        {v.description && (
-          <p className="text-slate-300 text-sm md:text-base leading-relaxed mb-4" data-testid="vacancy-description">
-            {v.description}
-          </p>
+        {(v.hindi_intro || v.description) && (
+          <div
+            className="text-slate-300 text-sm md:text-base leading-relaxed mb-4 vacancy-article"
+            data-testid="vacancy-description"
+            dangerouslySetInnerHTML={{ __html: v.hindi_intro ? renderRichText(v.hindi_intro) : enhanceHtml(v.description) }}
+          />
         )}
       </div>
 
@@ -452,6 +458,31 @@ const VacancyDetail = () => {
           {v.tags.map((t, i) => (
             <span key={i} className="text-xs font-medium px-2.5 py-1 rounded-full bg-white/5 border border-white/10 text-slate-300">#{t}</span>
           ))}
+        </div>
+      )}
+
+      {/* Hindi descriptive content (auto-generated: templates + AI rewrite) */}
+      {(v.hindi_description || v.hindi_how_to_apply || v.hindi_selection_process) && (
+        <div className="glass p-6 mb-6" data-testid="vacancy-hindi">
+          <div className="section-eyebrow mb-3">विवरण (हिंदी में)</div>
+          {v.hindi_description && (
+            <div className="mb-5" data-testid="hindi-description">
+              <h3 className="font-display text-lg font-bold text-emerald-300 mb-2">पूरा विवरण</h3>
+              <div className="vacancy-article text-sm" dangerouslySetInnerHTML={{ __html: renderRichText(v.hindi_description) }} />
+            </div>
+          )}
+          {v.hindi_how_to_apply && (
+            <div className="mb-5" data-testid="hindi-how-to-apply">
+              <h3 className="font-display text-lg font-bold text-emerald-300 mb-2">आवेदन कैसे करें</h3>
+              <div className="vacancy-article text-sm" dangerouslySetInnerHTML={{ __html: renderRichText(v.hindi_how_to_apply) }} />
+            </div>
+          )}
+          {v.hindi_selection_process && (
+            <div data-testid="hindi-selection-process">
+              <h3 className="font-display text-lg font-bold text-emerald-300 mb-2">चयन प्रक्रिया</h3>
+              <div className="vacancy-article text-sm" dangerouslySetInnerHTML={{ __html: renderRichText(v.hindi_selection_process) }} />
+            </div>
+          )}
         </div>
       )}
 
