@@ -241,21 +241,46 @@ export function mdBlocksToHtml(text) {
   const lines = String(text).split(/\r?\n/);
   const out = [];
   let listBuf = [];
-  const flush = () => {
+  let tableBuf = [];
+  const flushList = () => {
     if (listBuf.length) {
       out.push("<ul>" + listBuf.map((li) => `<li>${li}</li>`).join("") + "</ul>");
       listBuf = [];
     }
   };
+  const splitRow = (line) => line.replace(/^\s*\|/, "").replace(/\|\s*$/, "").split("|").map((c) => c.trim());
+  const isSep = (cells) => cells.length > 0 && cells.every((c) => /^:?-{2,}:?$/.test(c.replace(/\s/g, "")));
+  const flushTable = () => {
+    if (!tableBuf.length) return;
+    const rows = tableBuf.map(splitRow);
+    tableBuf = [];
+    // Not a real table (needs a header + at least one row) → render as paragraphs.
+    if (rows.length < 2) {
+      rows.forEach((r) => out.push(`<p>${r.join(" ")}</p>`));
+      return;
+    }
+    const header = rows[0];
+    const body = rows.slice(1).filter((r) => !isSep(r));
+    let html = '<div class="table-wrap"><table><thead><tr>' +
+      header.map((c) => `<th>${c}</th>`).join("") + "</tr></thead><tbody>";
+    body.forEach((r) => { html += "<tr>" + r.map((c) => `<td>${c}</td>`).join("") + "</tr>"; });
+    html += "</tbody></table></div>";
+    out.push(html);
+  };
   for (const raw of lines) {
     const line = raw.trim();
-    if (!line) { flush(); continue; }
+    // A markdown table row has 2+ pipe characters.
+    const isTableRow = (line.match(/\|/g) || []).length >= 2;
+    if (isTableRow) { flushList(); tableBuf.push(line); continue; }
+    flushTable();
+    if (!line) { flushList(); continue; }
     const bullet = line.match(/^(?:[*\-•·]|\d+[.)])\s+(.*)$/);
     if (bullet) { listBuf.push(bullet[1]); continue; }
-    flush();
+    flushList();
     out.push(`<p>${line}</p>`);
   }
-  flush();
+  flushList();
+  flushTable();
   return out.join("");
 }
 

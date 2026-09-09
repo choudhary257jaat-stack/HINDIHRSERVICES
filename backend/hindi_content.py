@@ -26,14 +26,28 @@ HINDI_MODEL = ("gemini", "gemini-2.5-flash")
 
 
 # ───────────────────────── helpers ─────────────────────────
-def _strip_html(raw, limit: int = 4000) -> str:
+def _strip_html(raw, limit: int = 6000) -> str:
+    """Convert content HTML to a text form the LLM can rewrite while PRESERVING
+    links (as markdown `[label](url)`) and table/line structure so the rewritten
+    Hindi keeps working links and tabular data."""
     if not raw:
         return ""
-    text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", str(raw), flags=re.I | re.S)
+    text = str(raw)
+    # Preserve anchors as markdown links BEFORE stripping tags (else URLs are lost).
+    text = re.sub(
+        r'<a\b[^>]*?href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+        lambda m: f'[{re.sub(r"<[^>]+>", " ", m.group(2)).strip() or "Link"}]({m.group(1)})',
+        text, flags=re.I | re.S,
+    )
+    text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", text, flags=re.I | re.S)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
+    text = re.sub(r"</(p|div|li|tr|h[1-6])>", "\n", text, flags=re.I)
     text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"&nbsp;", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text[:limit]
+    text = re.sub(r"&amp;", "&", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n[ \t]*\n[ \t]*\n+", "\n\n", text)
+    return text.strip()[:limit]
 
 
 def _f(v, *keys, default=""):
@@ -161,8 +175,13 @@ _SYSTEM = (
     "clear, natural, simple Hindi (Devanagari) in your own words — do NOT translate "
     "word-for-word. Keep proper nouns, organisation names, exam names, dates, "
     "numbers, fees and website/URL text exactly as in the source (do not translate "
-    "those). Use short paragraphs or bullet points. Output ONLY the Hindi content — "
-    "no preamble, no English explanation, no markdown headers."
+    "those). IMPORTANT: keep every markdown link EXACTLY in the form [text](url) — "
+    "do not drop the (url) part, and translate only the visible text label. Present "
+    "tabular data (like vacancy counts, important dates, branch-wise posts) as a "
+    "clean GitHub-style markdown table with a header row and a `| --- | --- |` "
+    "separator row. Use short paragraphs, '## ' for section headings and '* ' for "
+    "bullet points. Output ONLY the Hindi content — no preamble, no English "
+    "explanation."
 )
 
 

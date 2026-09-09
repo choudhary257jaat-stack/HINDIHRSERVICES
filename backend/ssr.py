@@ -100,6 +100,76 @@ def _strip_html(raw: Optional[str], limit: int = 300) -> str:
     return text
 
 
+def _inline_md(text: str) -> str:
+    """Escape text then apply inline markdown (links + bold)."""
+    s = _e(text)
+    s = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)",
+              r'<a href="\2" target="_blank" rel="noopener nofollow">\1</a>', s)
+    s = re.sub(r"\*\*([^*]+?)\*\*", r"<strong>\1</strong>", s)
+    # Auto-link bare URLs not already inside an anchor
+    s = re.sub(r"(?<!\")(?<!>)\b((?:https?://|www\.)[^\s<]+)",
+              lambda m: f'<a href="{m.group(1) if m.group(1).startswith("http") else "https://"+m.group(1)}" target="_blank" rel="noopener nofollow">{m.group(1)}</a>', s)
+    return s
+
+
+def _md_to_html(text: str) -> str:
+    """Convert markdown-ish text (headings, bullets, tables, links, bold) to HTML.
+    Mirrors the frontend so bots + JobPosting schema match the visible page."""
+    if not text:
+        return ""
+    lines = str(text).split("\n")
+    out, li_buf, tbl_buf = [], [], []
+
+    def flush_list():
+        if li_buf:
+            out.append("<ul>" + "".join(f"<li>{_inline_md(x)}</li>" for x in li_buf) + "</ul>")
+            li_buf.clear()
+
+    def split_row(line):
+        return [c.strip() for c in re.sub(r"^\s*\|", "", re.sub(r"\|\s*$", "", line)).split("|")]
+
+    def is_sep(cells):
+        return bool(cells) and all(re.fullmatch(r":?-{2,}:?", c.replace(" ", "")) for c in cells)
+
+    def flush_table():
+        if not tbl_buf:
+            return
+        rows = [split_row(l) for l in tbl_buf]
+        tbl_buf.clear()
+        if len(rows) < 2:
+            for r in rows:
+                out.append(f"<p>{_inline_md(' '.join(r))}</p>")
+            return
+        header = rows[0]
+        body = [r for r in rows[1:] if not is_sep(r)]
+        h = '<div class="table-wrap"><table><thead><tr>' + "".join(f"<th>{_inline_md(c)}</th>" for c in header) + "</tr></thead><tbody>"
+        for r in body:
+            h += "<tr>" + "".join(f"<td>{_inline_md(c)}</td>" for c in r) + "</tr>"
+        out.append(h + "</tbody></table></div>")
+
+    for raw in lines:
+        line = raw.strip()
+        if line.count("|") >= 2:
+            flush_list(); tbl_buf.append(line); continue
+        flush_table()
+        if not line:
+            flush_list(); continue
+        mh = re.match(r"^(#{1,4})\s+(.*)$", line)
+        if mh:
+            flush_list()
+            lvl = min(len(mh.group(1)) + 1, 4)
+            out.append(f"<h{lvl}>{_inline_md(mh.group(2))}</h{lvl}>")
+            continue
+        mb = re.match(r"^(?:[*\-•·]|\d+[.)])\s+(.*)$", line)
+        if mb:
+            li_buf.append(mb.group(1)); continue
+        flush_list()
+        out.append(f"<p>{_inline_md(line)}</p>")
+    flush_list()
+    flush_table()
+    return "".join(out)
+
+
 NAV_LINKS = [
     ("/", "Vacancies"),
     ("/services", "Services"),
@@ -178,6 +248,11 @@ h1{{font-size:28px;margin:0 0 8px}} h2{{font-size:20px;margin:24px 0 8px}}
 .meta{{color:#475569;font-size:14px}}
 .ssr-footer{{border-top:1px solid #e2e8f0;padding:20px 24px;color:#475569;font-size:13px;margin-top:32px}}
 .ssr-footer a{{color:#0f766e}}
+.table-wrap{{overflow-x:auto;border:1px solid #e2e8f0;border-radius:12px;margin:12px 0}}
+table{{border-collapse:collapse;width:100%;font-size:14px}}
+th,td{{border:1px solid #e2e8f0;padding:8px 12px;text-align:left}}
+th{{background:#ecfdf5;color:#065f46;font-weight:600}}
+a{{color:#0f766e}}
 </style>
 </head>
 <body>
@@ -278,7 +353,7 @@ async def _render_vacancy_detail(db, site_url: str, canonical: str, vac_id: str,
         h_select = h_select or t["hindi_selection_process"]
 
     def _para(text):
-        return "".join(f"<p>{_e(line)}</p>" for line in str(text).split("\n") if line.strip())
+        return _md_to_html(text)
 
     # Meta description = Hindi intro/description (matches the visible page)
     desc = (v.get("seo_description") or _strip_html(h_intro) or _strip_html(h_desc))[:300]

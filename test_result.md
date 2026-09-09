@@ -114,6 +114,18 @@ user_problem_statement: |
      Users reported crash (422 validation error) when editing scraped job posts with long descriptions.
 
 backend:
+  - task: "Hindi content: preserve links + render markdown tables (SSR + generation)"
+    implemented: true
+    working: "NA"
+    file: "backend/hindi_content.py, backend/ssr.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "FIX for user report: Hindi content showed raw markdown tables (| :---- | ...) and lost the working links (Official Notification PDF / Official Website 'Click here'). Fixes: (1) hindi_content._strip_html now converts <a href> to markdown [label](url) BEFORE stripping tags so URLs survive into the LLM input; keeps newlines/table structure; limit raised to 6000. (2) LLM system prompt updated to KEEP [text](url) links intact and output tabular data as GitHub-style markdown tables with a | --- | separator row. (3) ssr.py added _md_to_html() converting headings/bullets/links/bold and MARKDOWN TABLES to styled HTML tables; vacancy SSR body + JobPosting JSON-LD now use it (bot HTML no longer shows raw pipes). TEST: (a) POST /api/admin/vacancies/{id}/hindi/regenerate (admin auth) on a scraped job whose content_html contains <a> links + tables → returned hindi_description/hindi_how_to_apply contain markdown links [..](http...) AND markdown tables with pipes. (b) GET /api/render?path=/vacancies/{id} (UA facebookexternalhit/1.1) → HTML body contains <table> elements and <a href=... target=_blank> anchors, and does NOT contain raw '| :----' separator text. Pick a job with rich content e.g. a 'DRDO CVRDE' vacancy id from GET /api/vacancies?q=CVRDE or ?q=DRDO."
+
   - task: "Hindi content generation for vacancies (Hybrid templates + Gemini Flash LLM), lazy + cached"
     implemented: true
     working: true
